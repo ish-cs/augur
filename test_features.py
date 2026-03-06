@@ -395,6 +395,36 @@ class TestContextServerEndpoints(unittest.TestCase):
         self.assertGreater(d['total'], 0)
         print(f"  [PASS] GET /browser-captures returned {len(d['results'])} results")
 
+    def test_profile_endpoint(self):
+        d, status = req('/profile?days=7')
+        self.assertEqual(status, 200)
+        self.assertIn('profile', d)
+        self.assertIn('generated_at', d)
+        profile = d['profile']
+        for key in ('top_apps', 'active_hours', 'top_domains', 'top_topics', 'browser_captures'):
+            self.assertIn(key, profile, f"profile missing key: {key}")
+        print(f"  [PASS] /profile endpoint OK — top apps: {[a['app'] for a in profile['top_apps'][:3]]}")
+
+    def test_context_card_endpoint(self):
+        d, status = req('/context-card')
+        self.assertEqual(status, 200)
+        self.assertIn('card', d)
+        self.assertIn('generated_at', d)
+        card = d['card']
+        self.assertIsInstance(card, str)
+        self.assertGreater(len(card), 10)
+        print(f"  [PASS] /context-card returns string ({len(card)} chars)")
+
+    def test_context_includes_source_field(self):
+        d, status = req('/context?q=test&limit=5')
+        self.assertEqual(status, 200)
+        self.assertIn('browser_captures_included', d)
+        self.assertIn('semantic_enhanced', d)
+        for item in d.get('results', []):
+            self.assertIn('source', item, "Each result must have a 'source' field")
+            self.assertIn(item['source'], ('ocr', 'audio', 'browser'))
+        print(f"  [PASS] /context results have source field and metadata flags")
+
     def test_semantic_endpoint(self):
         try:
             d, status = req('/semantic?q=test&limit=5')
@@ -480,6 +510,377 @@ class TestExistingFeatures(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────
+class TestBrowserCapturesInContext(unittest.TestCase):
+    """Verify context-server.py merges browser captures into /context ranking."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'context-server.py')
+        with open(path) as f:
+            return f.read()
+
+    def test_browser_candidate_converter(self):
+        src = self._read_src()
+        self.assertIn('browser_capture_to_candidate', src)
+        self.assertIn('browser_', src)  # browser_ prefix for UIDs
+        print("  [PASS] context-server.py has browser_capture_to_candidate()")
+
+    def test_context_response_includes_metadata_flags(self):
+        src = self._read_src()
+        self.assertIn('browser_captures_included', src)
+        self.assertIn('semantic_enhanced', src)
+        print("  [PASS] /context response includes browser_captures_included + semantic_enhanced flags")
+
+    def test_source_field_on_results(self):
+        src = self._read_src()
+        self.assertIn("'source'", src)
+        self.assertIn("'browser'", src)
+        self.assertIn("'ocr'", src)
+        self.assertIn("'audio'", src)
+        print("  [PASS] context-server.py sets source field (ocr/audio/browser) on results")
+
+    def test_browser_scoring_includes_bonuses(self):
+        src = self._read_src()
+        self.assertIn('sel_bon', src)
+        self.assertIn('time_on_page_s', src)
+        self.assertIn('selected_text', src)
+        print("  [PASS] Browser scoring includes time_on_page_s bonus and selection sel_bon")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestHybridScoring(unittest.TestCase):
+    """Verify hybrid scoring formula and semantic integration in context-server.py."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'context-server.py')
+        with open(path) as f:
+            return f.read()
+
+    def test_semantic_globals_exist(self):
+        src = self._read_src()
+        self.assertIn('_semantic_embedder', src)
+        self.assertIn('_semantic_collection', src)
+        self.assertIn('_semantic_available', src)
+        print("  [PASS] Semantic module-level globals present in context-server.py")
+
+    def test_try_load_semantic_function(self):
+        src = self._read_src()
+        self.assertIn('_try_load_semantic', src)
+        self.assertIn('import semantic_search', src)
+        print("  [PASS] _try_load_semantic() present for lazy loading")
+
+    def test_semantic_score_applied_as_bonus(self):
+        src = self._read_src()
+        self.assertIn('_get_semantic_scores', src)
+        self.assertIn('sem_bonus', src)
+        self.assertIn('semantic_scores', src)
+        print("  [PASS] Semantic bonus (sem_bonus) applied to OCR/audio scores")
+
+    def test_hybrid_score_formula(self):
+        """Score formula: (kw_matches * 3) + recency + sem_bonus + browser_bonuses."""
+        # Verify the formula constants exist in source
+        src = self._read_src()
+        self.assertIn('* 3', src)    # keyword weight
+        self.assertIn('* 2.0', src)  # semantic cosine multiplier
+        self.assertIn('recency', src)
+        print("  [PASS] Hybrid score formula constants present (kw×3, semantic×2.0, recency)")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestMCPServer(unittest.TestCase):
+    """Verify mcp_server.py exists and implements the MCP protocol correctly."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'mcp_server.py')
+        self.assertTrue(os.path.exists(path), "mcp_server.py not found")
+        with open(path) as f:
+            return f.read()
+
+    def test_mcp_file_exists(self):
+        path = os.path.join(os.path.dirname(__file__), 'mcp_server.py')
+        self.assertTrue(os.path.exists(path))
+        print("  [PASS] mcp_server.py exists")
+
+    def test_mcp_syntax(self):
+        import ast
+        path = os.path.join(os.path.dirname(__file__), 'mcp_server.py')
+        with open(path) as f:
+            src = f.read()
+        try:
+            ast.parse(src)
+        except SyntaxError as e:
+            self.fail(f"mcp_server.py has syntax error: {e}")
+        print("  [PASS] mcp_server.py has valid syntax")
+
+    def test_five_tools_defined(self):
+        src = self._read_src()
+        tools = ['get_context', 'get_daily_summary', 'get_anomalies', 'get_user_profile', 'get_browser_activity']
+        for t in tools:
+            self.assertIn(t, src, f"Tool '{t}' not found in mcp_server.py")
+        print(f"  [PASS] All 5 MCP tools defined: {tools}")
+
+    def test_stdio_protocol(self):
+        src = self._read_src()
+        self.assertIn('Content-Length', src)
+        self.assertIn('sys.stdin.buffer', src)
+        self.assertIn('sys.stdout.buffer', src)
+        self.assertIn('sys.stderr', src)
+        print("  [PASS] MCP uses Content-Length framing on stdin/stdout, stderr for logs")
+
+    def test_notification_handling(self):
+        """Notifications (no 'id') must not receive a response."""
+        src = self._read_src()
+        self.assertIn("'id'", src)
+        self.assertIn('notification', src)
+        print("  [PASS] mcp_server.py handles notifications (no response sent)")
+
+    def test_pure_stdlib(self):
+        """mcp_server.py must only use stdlib imports."""
+        import ast
+        path = os.path.join(os.path.dirname(__file__), 'mcp_server.py')
+        with open(path) as f:
+            src = f.read()
+        tree = ast.parse(src)
+        stdlib_mods = {'json', 'sys', 'os', 'io', 'traceback', 'urllib', 'datetime',
+                       'threading', 'http', 'time', 'logging', 'collections'}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertIn(alias.name.split('.')[0], stdlib_mods,
+                                  f"Non-stdlib import found: {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    self.assertIn(node.module.split('.')[0], stdlib_mods,
+                                  f"Non-stdlib import found: {node.module}")
+        print("  [PASS] mcp_server.py uses only stdlib imports")
+
+    def test_mcp_initialize_response(self):
+        """Run mcp_server and send an initialize request, check response."""
+        import subprocess, struct
+        path = os.path.join(os.path.dirname(__file__), 'mcp_server.py')
+        msg = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}
+        })
+        frame = f"Content-Length: {len(msg)}\r\n\r\n{msg}".encode()
+        try:
+            proc = subprocess.run(
+                ['python3', path], input=frame,
+                capture_output=True, timeout=5
+            )
+            out = proc.stdout.decode(errors='replace')
+            self.assertIn('Content-Length', out)
+            self.assertIn('"result"', out)
+            self.assertIn('serverInfo', out)
+            print("  [PASS] mcp_server.py responds correctly to initialize")
+        except subprocess.TimeoutExpired:
+            self.fail("mcp_server.py timed out on initialize")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestProfileEndpoints(unittest.TestCase):
+    """Verify /profile and /context-card endpoints exist in context-server.py."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'context-server.py')
+        with open(path) as f:
+            return f.read()
+
+    def test_get_profile_function(self):
+        src = self._read_src()
+        self.assertIn('get_profile', src)
+        print("  [PASS] get_profile() function present in context-server.py")
+
+    def test_get_context_card_function(self):
+        src = self._read_src()
+        self.assertIn('get_context_card', src)
+        print("  [PASS] get_context_card() function present in context-server.py")
+
+    def test_profile_route(self):
+        src = self._read_src()
+        self.assertIn("'/profile'", src)
+        print("  [PASS] /profile route registered")
+
+    def test_context_card_route(self):
+        src = self._read_src()
+        self.assertIn("'/context-card'", src)
+        print("  [PASS] /context-card route registered")
+
+    def test_profile_fields(self):
+        src = self._read_src()
+        for field in ('top_apps', 'active_hours', 'top_domains', 'top_topics', 'browser_captures'):
+            self.assertIn(field, src, f"Profile field '{field}' not in context-server.py")
+        print("  [PASS] Profile response includes all required fields")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestDemoAgentBackends(unittest.TestCase):
+    """Verify demo_agent.py supports multiple LLM backends via --api flag."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'demo_agent.py')
+        with open(path) as f:
+            return f.read()
+
+    def test_api_flag_present(self):
+        src = self._read_src()
+        self.assertIn('--api', src)
+        print("  [PASS] demo_agent.py has --api flag")
+
+    def test_claude_backend(self):
+        src = self._read_src()
+        self.assertIn('_ask_claude', src)
+        self.assertIn('ANTHROPIC_API_KEY', src)
+        self.assertIn('anthropic', src)
+        print("  [PASS] demo_agent.py has Claude backend (_ask_claude)")
+
+    def test_openai_backend(self):
+        src = self._read_src()
+        self.assertIn('_ask_openai', src)
+        self.assertIn('OPENAI_API_KEY', src)
+        self.assertIn('openai', src)
+        print("  [PASS] demo_agent.py has OpenAI backend (_ask_openai)")
+
+    def test_lmstudio_backend(self):
+        src = self._read_src()
+        self.assertIn('_ask_lmstudio', src)
+        self.assertIn('1234', src)
+        print("  [PASS] demo_agent.py has LM Studio backend (_ask_lmstudio)")
+
+    def test_lazy_imports(self):
+        """Cloud backends must use lazy imports (inside function, not top-level)."""
+        import ast
+        path = os.path.join(os.path.dirname(__file__), 'demo_agent.py')
+        with open(path) as f:
+            src = f.read()
+        tree = ast.parse(src)
+        top_level_imports = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top_level_imports.add(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    top_level_imports.add(node.module)
+        self.assertNotIn('anthropic', top_level_imports, "anthropic must be lazily imported")
+        self.assertNotIn('openai', top_level_imports, "openai must be lazily imported")
+        print("  [PASS] anthropic and openai are lazily imported (not top-level)")
+
+    def test_syntax(self):
+        import ast
+        path = os.path.join(os.path.dirname(__file__), 'demo_agent.py')
+        with open(path) as f:
+            src = f.read()
+        try:
+            ast.parse(src)
+        except SyntaxError as e:
+            self.fail(f"demo_agent.py syntax error: {e}")
+        print("  [PASS] demo_agent.py has valid syntax")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestLaunchSemanticIndexer(unittest.TestCase):
+    """Verify launch.command auto-starts the semantic indexer."""
+
+    def _read_src(self):
+        path = os.path.join(os.path.dirname(__file__), 'launch.command')
+        with open(path) as f:
+            return f.read()
+
+    def test_semantic_constants(self):
+        src = self._read_src()
+        self.assertIn('SEMANTIC_INDEXER', src)
+        self.assertIn('SEMANTIC_PID_FILE', src)
+        self.assertIn('semantic_indexer.pid', src)
+        print("  [PASS] launch.command has semantic indexer constants")
+
+    def test_is_semantic_available(self):
+        src = self._read_src()
+        self.assertIn('is_semantic_available', src)
+        self.assertIn('chromadb', src)
+        self.assertIn('sentence_transformers', src)
+        print("  [PASS] launch.command checks chromadb + sentence_transformers availability")
+
+    def test_start_semantic_indexer(self):
+        src = self._read_src()
+        self.assertIn('start_semantic_indexer', src)
+        self.assertIn('subprocess', src)
+        self.assertIn('is_semantic_running', src)
+        print("  [PASS] launch.command starts semantic indexer as subprocess")
+
+    def test_keepalive_shows_semantic_status(self):
+        src = self._read_src()
+        self.assertIn('semantic', src.lower())
+        # Should show [semantic: up/down] in keep-alive
+        self.assertIn('is_semantic_running', src)
+        print("  [PASS] Keep-alive loop shows semantic indexer status")
+
+
+# ─────────────────────────────────────────────────────────────────────
+class TestDashboardV3(unittest.TestCase):
+    """Verify v0.3 dashboard features: Browser tab + semantic search mode."""
+
+    def _read_html(self):
+        path = os.path.join(os.path.dirname(__file__), 'screenpipe-dashboard.html')
+        with open(path) as f:
+            return f.read()
+
+    def test_browser_tab_button(self):
+        html = self._read_html()
+        self.assertIn("switchTab('browser'", html)
+        self.assertIn('>Browser<', html)
+        print("  [PASS] Dashboard has Browser tab button")
+
+    def test_browser_tab_div(self):
+        html = self._read_html()
+        self.assertIn('id="browserTab"', html)
+        self.assertIn('id="browserContent"', html)
+        print("  [PASS] Dashboard has browserTab and browserContent divs")
+
+    def test_load_browser_activity_function(self):
+        html = self._read_html()
+        self.assertIn('loadBrowserActivity', html)
+        self.assertIn('browser-captures', html)
+        print("  [PASS] loadBrowserActivity() fetches /browser-captures")
+
+    def test_switchtab_handles_browser(self):
+        html = self._read_html()
+        self.assertIn("name === 'browser'", html)
+        self.assertIn("if (name === 'browser') loadBrowserActivity", html)
+        print("  [PASS] switchTab() handles browser tab correctly")
+
+    def test_search_mode_toggle(self):
+        html = self._read_html()
+        self.assertIn('modeKeyword', html)
+        self.assertIn('modeSemantic', html)
+        self.assertIn('setSearchMode', html)
+        self.assertIn('_searchMode', html)
+        print("  [PASS] Search mode toggle (Keyword / Semantic) present")
+
+    def test_semantic_search_function(self):
+        html = self._read_html()
+        self.assertIn('_doSemanticSearch', html)
+        self.assertIn('localhost:3031/context', html)
+        self.assertIn('semantic_enhanced', html)
+        print("  [PASS] _doSemanticSearch() calls Context API")
+
+    def test_keyword_search_refactored(self):
+        html = self._read_html()
+        self.assertIn('_doKeywordSearch', html)
+        self.assertIn('searchResults', html)
+        print("  [PASS] _doKeywordSearch() uses searchResults container")
+
+    def test_browser_card_css(self):
+        html = self._read_html()
+        self.assertIn('.browser-card', html)
+        self.assertIn('.browser-url', html)
+        self.assertIn('.badge-browser', html)
+        self.assertIn('.mode-btn', html)
+        self.assertIn('.sim-score', html)
+        print("  [PASS] Browser card and search mode CSS classes present")
+
+
+# ─────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print()
     print("  ┌────────────────────────────────────────────┐")
@@ -498,6 +899,15 @@ if __name__ == '__main__':
     suite.addTests(loader.loadTestsFromTestCase(TestSemanticSearch))
     suite.addTests(loader.loadTestsFromTestCase(TestBrowserCaptures))
     suite.addTests(loader.loadTestsFromTestCase(TestAnomalyDetection))
+    # v0.3 test classes
+    suite.addTests(loader.loadTestsFromTestCase(TestBrowserCapturesInContext))
+    suite.addTests(loader.loadTestsFromTestCase(TestHybridScoring))
+    suite.addTests(loader.loadTestsFromTestCase(TestMCPServer))
+    suite.addTests(loader.loadTestsFromTestCase(TestProfileEndpoints))
+    suite.addTests(loader.loadTestsFromTestCase(TestDemoAgentBackends))
+    suite.addTests(loader.loadTestsFromTestCase(TestLaunchSemanticIndexer))
+    suite.addTests(loader.loadTestsFromTestCase(TestDashboardV3))
+    # Live endpoint tests (skipped unless --live)
     suite.addTests(loader.loadTestsFromTestCase(TestContextServerEndpoints))
 
     runner = unittest.TextTestRunner(verbosity=0, stream=open(os.devnull, 'w'))

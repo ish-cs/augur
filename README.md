@@ -14,44 +14,49 @@ Everything runs locally. No cloud, no API keys, no data leaves your machine.
 ```bash
 curl "http://localhost:3031/context?q=what+was+I+working+on"
 ```
-Returns relevance-ranked screen captures + browser activity for any natural language query. Any AI agent or tool can call this.
+Returns relevance-ranked screen captures + browser activity for any natural language query. Any AI agent or tool can call this. Results are scored by keyword matches, recency, semantic similarity (if the indexer is running), and browser behavior signals (dwell time, text selection).
 
-### MCP Server (v0.3)
-Drop-in integration with Claude Desktop, Cursor, and any MCP-compatible AI agent. Configure once — your AI agent automatically knows your screen context with no code changes.
+### MCP Server
+Drop-in integration with Claude Desktop, Cursor, and any MCP-compatible AI agent. Configure once — your AI agent automatically has access to your screen context with no code changes.
 
 ### Dashboard
 - **Live Feed** — real-time view of OCR captures and audio transcriptions
-- **Search** — full-text search (keyword and semantic modes) across your entire screen history
+- **Search** — keyword search or semantic search (requires semantic indexer) across your entire screen history
 - **Raw SQL** — direct queries against the screenpipe SQLite database
-- **Ask AI** — chat with a local LLM that has automatic access to your screen context
+- **Ask AI** — chat with a local LLM (or Claude/OpenAI) that has automatic access to your screen context
 - **Timeline** — gantt-style chart of today's app activity by hour
 - **Anomalies** — behavioral anomaly detection vs rolling N-day baseline
-- **Browser Activity** — recent browser extension captures (URL, dwell time, selections)
+- **Browser Activity** — recent browser extension captures: URL, dwell time, text selections
 - **Today's Summary** — one-click AI-generated digest: activities, apps, topics, action items
 - **Context Snapshot** — export a 7-day behavioral profile as structured JSON
-- **Storage Management** — view DB size, clean up old records
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                           Your Mac                               │
-│                                                                  │
-│  ┌──────────────┐  REST API   ┌────────────────────────────────┐ │
-│  │  screenpipe  │ ◄─────────► │  screenpipe-dashboard.html     │ │
-│  │  :3030       │             └────────────────┬───────────────┘ │
-│  │  SQLite DB   │                              │ OpenAI API      │
-│  └──────┬───────┘                     ┌────────▼────────┐        │
-│         │                             │   LM Studio     │        │
-│         │ REST API                    │   (any LLM)     │        │
-│  ┌──────▼───────┐                     │   :1234         │        │
-│  │ context-     │◄─── GET /context ───┴─────────────────┘        │
-│  │ server.py    │     from agents                                 │
-│  │  :3031       │                                                 │
-│  └──────────────┘                                                 │
-└──────────────────────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|                           Your Mac                               |
+|                                                                  |
+|  +--------------+  REST API   +--------------------------------+ |
+|  |  screenpipe  | <---------> |  screenpipe-dashboard.html     | |
+|  |  :3030       |             +----------------+---------------+ |
+|  |  SQLite DB   |                              | OpenAI-compat   |
+|  +---------+----+                     +--------v--------+        |
+|            |                          |   LM Studio     |        |
+|            | REST API                 |   (any LLM)     |        |
+|  +---------v----+                     |   :1234         |        |
+|  | context-     |<-- GET /context ----+-----------------+        |
+|  | server.py    |                                                 |
+|  |  :3031       |<-- MCP stdio --- mcp_server.py                  |
+|  +--------------+                                                 |
+|            ^                                                      |
+|            | POST /browser-capture                                |
+|  +---------+----+                                                 |
+|  | Chrome       |  (browser extension)                           |
+|  | extension    |                                                 |
+|  +--------------+                                                 |
++------------------------------------------------------------------+
 ```
 
 ---
@@ -61,10 +66,10 @@ Drop-in integration with Claude Desktop, Cursor, and any MCP-compatible AI agent
 | Requirement | Notes |
 |---|---|
 | **macOS** | screenpipe is macOS-only |
-| **[screenpipe](https://github.com/mediar-ai/screenpipe)** | The capture backend |
-| **Python 3** | Pre-installed on macOS. For `context-server.py` and `launch.command` |
-| **[LM Studio](https://lmstudio.ai)** | For the AI chat features (optional) |
-| **A browser** | Chrome recommended |
+| **[screenpipe](https://github.com/mediar-ai/screenpipe)** | The capture backend. Install via their guide. |
+| **Python 3** | Pre-installed on macOS. Used for `context-server.py`, `launch.command`, `mcp_server.py`. |
+| **Google Chrome** | Recommended for the dashboard and browser extension. |
+| **[LM Studio](https://lmstudio.ai)** | Optional. For the AI chat feature using a local LLM. |
 
 ---
 
@@ -72,11 +77,11 @@ Drop-in integration with Claude Desktop, Cursor, and any MCP-compatible AI agent
 
 ### 1. Install screenpipe
 
-Follow the [official guide](https://github.com/mediar-ai/screenpipe). The binary is typically at `~/bin/screenpipe` or `/usr/local/bin/screenpipe`.
-
+Follow the [official guide](https://github.com/mediar-ai/screenpipe). Verify it works:
 ```bash
-screenpipe --help   # verify it works
+screenpipe --help
 ```
+The binary is typically at `~/bin/screenpipe`. If it's elsewhere, update `SCREENPIPE_BIN` in `launch.command`.
 
 ### 2. Clone this repo
 
@@ -85,21 +90,30 @@ git clone https://github.com/ish-cs/nomenclator.git
 cd nomenclator
 ```
 
-### 3. Configure the launcher
-
-Open `launch.command` and set `SCREENPIPE_BIN` to your screenpipe binary path:
-
-```python
-SCREENPIPE_BIN = os.path.expanduser("~/bin/screenpipe")
-```
-
-### 4. Make the launcher executable
+### 3. Make the launcher executable
 
 ```bash
 chmod +x launch.command
 ```
 
-### 5. (Optional) Set up LM Studio
+### 4. (Optional) Install semantic search dependencies
+
+For vector-based semantic search, install:
+```bash
+pip install chromadb sentence-transformers
+```
+
+This enables the **Semantic** search mode in the dashboard and improves context ranking quality. Without it, keyword scoring still works fully.
+
+### 5. (Optional) Install cloud LLM backends
+
+For the `demo_agent.py` cloud backends:
+```bash
+pip install anthropic   # for --api claude
+pip install openai      # for --api openai
+```
+
+### 6. (Optional) Set up LM Studio
 
 Download [LM Studio](https://lmstudio.ai), then:
 1. Go to the **Local Server** tab
@@ -115,14 +129,15 @@ Download [LM Studio](https://lmstudio.ai), then:
 ### Option A: Double-click launcher (recommended)
 
 Double-click `launch.command` in Finder. It:
-1. Cleans up raw screenpipe files older than 7 days
-2. Starts screenpipe if not running (waits up to 15s)
-3. Starts the Context API server on port 3031
-4. Checks LM Studio (warns if offline, non-blocking)
-5. Opens the dashboard in your browser
-6. Prints live status every 10s
+1. Cleans up raw screenpipe files older than 7 days (`~/.screenpipe/data/`)
+2. Starts screenpipe if not running (waits up to 15s for startup)
+3. Starts the Context API server on port 3031 (background subprocess)
+4. Starts the semantic indexer if chromadb + sentence-transformers are installed
+5. Checks LM Studio (warns if offline, non-blocking)
+6. Opens the dashboard in your browser
+7. Prints live status every 10s: `[screenpipe: up] [context-api: up] [semantic: up] [LM Studio: up]`
 
-Press `Ctrl+C` to exit the launcher. screenpipe and the context server keep running.
+Press `Ctrl+C` to stop the launcher. screenpipe and the context server keep running.
 
 ### Option B: Manual
 
@@ -134,6 +149,11 @@ Press `Ctrl+C` to exit the launcher. screenpipe and the context server keep runn
 **Terminal 2** — Context API:
 ```bash
 python3 context-server.py
+```
+
+**Terminal 3** — Semantic indexer (optional):
+```bash
+python3 semantic_search.py
 ```
 
 **Browser** — dashboard:
@@ -151,31 +171,82 @@ The core product. Any script or agent can call it:
 # Health check
 curl http://localhost:3031/health
 
-# Get context for a query (includes browser captures + semantic scoring in v0.3)
-curl "http://localhost:3031/context?q=typescript+react&limit=10"
+# Get ranked context for a query
+curl "http://localhost:3031/context?q=what+was+I+working+on&limit=10"
 
-# Daily summary
-curl "http://localhost:3031/summary?date=2026-03-05"
+# Today's summary
+curl "http://localhost:3031/summary?date=2026-03-06"
 
-# Behavioral profile (v0.3)
+# Behavioral anomalies (vs 7-day baseline)
+curl "http://localhost:3031/anomalies?days=7"
+
+# Semantic search (requires chromadb)
+curl "http://localhost:3031/semantic?q=typescript+react&limit=10"
+
+# Recent browser captures
+curl "http://localhost:3031/browser-captures?limit=20"
+
+# 7-day behavioral profile
 curl "http://localhost:3031/profile?days=7"
 
-# Compact profile for LLM injection (v0.3)
+# Compact profile string for LLM injection
 curl "http://localhost:3031/context-card"
 ```
 
-**Parameters for `/context`:**
-- `q` — natural language query (required)
-- `limit` — number of results (default: 15)
-- `window_hours` — recency window for scoring (default: 24)
+### `/context` parameters
+| Parameter | Default | Description |
+|---|---|---|
+| `q` | required | Natural language query |
+| `limit` | 15 | Max results to return |
+| `window_hours` | 24 | Recency window for scoring |
 
-Results are scored by `(keyword_matches × 3) + recency + semantic_bonus + browser_bonuses` and returned ranked.
+### Scoring formula
+```
+score = (keyword_matches x 3) + recency + semantic_bonus + [time_bonus + selection_bonus]
+```
+- `keyword_matches x 3` — substring hits in text, app, window, url
+- `recency` — decays from 1.0 to 0 over the window period
+- `semantic_bonus` — cosine similarity x 2.0, only when Chroma index is populated
+- `time_bonus` (browser only) — up to 1.0 for 5+ minutes dwell time
+- `selection_bonus` (browser only) — +2.0 if text was selected on that page
+
+### Response shape
+```json
+{
+  "query": "what was I working on",
+  "results": [
+    {
+      "frame_id": "12345",
+      "timestamp": "2026-03-06T14:23:00Z",
+      "app": "VS Code",
+      "window": "context-server.py",
+      "text": "def gather_context(query, limit, window_hours):",
+      "score": 5.4,
+      "source": "ocr"
+    },
+    {
+      "frame_id": "browser_98765432",
+      "timestamp": "2026-03-06T14:20:00Z",
+      "app": "Browser",
+      "url": "https://github.com/ish-cs/nomenclator",
+      "text": "personal context layer for AI agents",
+      "score": 3.7,
+      "source": "browser"
+    }
+  ],
+  "browser_captures_included": 1,
+  "semantic_enhanced": true
+}
+```
+
+---
 
 ## MCP Server (Claude Desktop / Cursor)
 
-Configure Augur as an MCP server so Claude Desktop automatically has access to your screen context:
+Configure Augur as an MCP server so Claude Desktop or Cursor automatically have access to your screen context.
 
-**1. Add to `~/.claude/claude_desktop_config.json`:**
+### 1. Add to `~/.claude/claude_desktop_config.json`
+
 ```json
 {
   "mcpServers": {
@@ -187,27 +258,37 @@ Configure Augur as an MCP server so Claude Desktop automatically has access to y
 }
 ```
 
-**2. Restart Claude Desktop.** The following tools appear automatically:
-- `get_context` — ranked screen captures for any query
-- `get_daily_summary` — today's activity breakdown
-- `get_anomalies` — behavioral anomalies vs baseline
-- `get_user_profile` — 7-day behavioral profile
-- `get_browser_activity` — recent browser captures
+Replace `/Users/YOUR_NAME/Desktop/nomenclator` with the actual path to this repo.
+
+### 2. Restart Claude Desktop
+
+The following tools appear automatically in Claude Desktop:
+
+| Tool | Description |
+|---|---|
+| `get_context` | Ranked screen captures for any natural language query |
+| `get_daily_summary` | Today's activity breakdown by app and topic |
+| `get_anomalies` | Behavioral anomalies vs N-day baseline |
+| `get_user_profile` | 7-day behavioral profile (apps, hours, domains, topics) |
+| `get_browser_activity` | Recent browser extension captures |
 
 The Context API (`context-server.py`) must be running for MCP tools to return data.
+
+### For Cursor
+Add the same configuration to Cursor's MCP settings (Settings -> MCP).
 
 ---
 
 ## Agent Integration Demo
 
 ```bash
-# Single query mode (uses LM Studio by default)
+# Single query — uses LM Studio by default
 python3 demo_agent.py "what have I been working on today?"
 
-# Use Claude API (requires ANTHROPIC_API_KEY)
+# Use Claude API (requires ANTHROPIC_API_KEY env var)
 python3 demo_agent.py "what have I been working on?" --api claude
 
-# Use OpenAI API (requires OPENAI_API_KEY)
+# Use OpenAI API (requires OPENAI_API_KEY env var)
 python3 demo_agent.py "what have I been working on?" --api openai
 
 # Watch mode — polls every 30s, summarizes activity changes
@@ -215,14 +296,49 @@ python3 demo_agent.py --watch
 python3 demo_agent.py --watch --api claude
 ```
 
-The demo calls the Context API, injects ranked screen context, then calls your chosen LLM backend. Watch mode shows agents being proactively fed context as your activity changes.
+The demo calls the Context API, injects ranked screen context, then calls the chosen LLM backend. Watch mode shows agents being proactively fed context as your activity changes.
 
-**Optional setup for cloud LLM backends:**
+**Setup for cloud backends:**
 ```bash
-pip install anthropic   # for --api claude
-pip install openai      # for --api openai
+pip install anthropic        # for --api claude
+pip install openai           # for --api openai
 export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=gpt-4o  # optional, default: gpt-4o
+```
+
+---
+
+## Browser Extension
+
+### Install
+1. Open Chrome and go to `chrome://extensions/`
+2. Enable **Developer mode** (top right toggle)
+3. Click **Load unpacked** and select the `extension/` folder in this repo
+4. The Augur icon appears in your toolbar
+
+### What it captures
+For every page you visit, the extension sends to the Context API:
+- Page URL and title
+- Time spent on the page (seconds)
+- Scroll depth (percentage)
+- Any text you selected/highlighted
+
+This data appears in the **Browser Activity** dashboard tab and is blended into `/context` ranking results.
+
+### Requirements
+The extension POSTs to `http://localhost:3031/browser-capture` — the Context API must be running.
+
+---
+
+## Running the Tests
+
+```bash
+# Offline tests (no server needed) — verifies all v0.3 features
+python3 test_features.py
+
+# Live tests (requires context-server.py running at :3031)
+python3 test_features.py --live
 ```
 
 ---
@@ -231,64 +347,77 @@ export OPENAI_API_KEY=sk-...
 
 ```
 nomenclator/
-├── screenpipe-dashboard.html   # Full browser dashboard (single self-contained file)
-├── launch.command              # Double-click launcher — starts everything
-├── context-server.py           # Context API server (port 3031) — the core product
-├── demo_agent.py               # Agent integration demo (LM Studio, Claude, OpenAI)
-├── semantic_search.py          # Chroma vector store indexer + semantic query
-├── mcp_server.py               # MCP server for Claude Desktop / Cursor (v0.3)
-├── requirements.txt            # pip deps
-├── test_features.py            # Feature test suite
-├── extension/                  # Chrome browser extension (MV3)
-│   ├── manifest.json
-│   ├── background.js
-│   ├── content.js
-│   └── popup.html/js/css
-├── README.md
-└── DOCS/
-    ├── PRODUCT.md              # Full technical product documentation
-    ├── CLAUDE.md               # Project context for AI-assisted development
-    └── (PLAN.md in root)       # v0.3 implementation plan
++-- screenpipe-dashboard.html   # Full browser dashboard (single self-contained HTML file)
++-- launch.command              # Double-click launcher — starts everything
++-- context-server.py           # Context API server (port 3031) — the core product
++-- demo_agent.py               # Agent integration demo (LM Studio, Claude, OpenAI)
++-- semantic_search.py          # Chroma vector store indexer + semantic query engine
++-- mcp_server.py               # MCP server for Claude Desktop / Cursor
++-- requirements.txt            # pip deps (chromadb, sentence-transformers)
++-- test_features.py            # Feature test suite (offline + --live modes)
++-- extension/                  # Chrome browser extension (MV3)
+|   +-- manifest.json           # Extension manifest (permissions, service worker)
+|   +-- background.js           # Service worker: captures tab events, sends to API
+|   +-- content.js              # Page script: tracks time, scroll depth, selections
+|   +-- popup.html/js/css       # Extension popup UI
++-- README.md
++-- DOCS/
+    +-- PRODUCT.md              # Full technical product documentation
+    +-- CLAUDE.md               # Project context for AI-assisted development
+```
+
+**Runtime files (auto-created, not in repo):**
+```
+~/bin/screenpipe                        # screenpipe binary
+~/.screenpipe/db.sqlite                 # SQLite database (OCR + audio records)
+~/.screenpipe/data/                     # Raw video/audio files (auto-cleaned, ~1-2 GB/day)
+~/.screenpipe/browser_captures.json    # Browser extension captures (max 1000 entries)
+~/.screenpipe/augur_semantic_db/        # Chroma persistent vector store
+~/.screenpipe/semantic_indexer.pid      # PID file for semantic indexer process
+~/.screenpipe/launcher.log              # Log from launch.command
 ```
 
 ---
 
 ## Dashboard Features
 
+### Live Feed
+The most recent 20 captures as expandable cards. Each card shows: source type (OCR/Audio), app name, window title, timestamp, URL (if browser), and the captured text. Click to expand the full text.
+
 ### Search
-Type in the search bar + `Enter`. Searches all OCR text screenpipe has ever captured. Matched terms highlighted in results.
+Type in the search bar and press Enter. Two modes:
+
+- **Keyword** (default) — searches screenpipe's full-text index. Fast, exact match. Results highlighted in green.
+- **Semantic** — calls the Context API's hybrid scorer. Results ranked by meaning, not just keyword. Requires the semantic indexer to be running (install: `pip install chromadb sentence-transformers`).
+
+### Raw SQL
+Write any SQL query directly against the screenpipe SQLite database and see results in a table. Two preset buttons for common queries.
 
 ### Ask AI
 Every question automatically pulls relevant screen captures as context:
-1. Keywords extracted from the question
+1. Keywords extracted from the question (stop words removed)
 2. screenpipe searched per keyword in parallel
 3. Results merged, deduplicated, ranked by relevance
 4. Top captures injected into the LLM prompt
 
-Chat history persists across page refreshes (up to 50 messages, stored in `localStorage`). Use the "↺ Clear" button to reset.
+Chat history persists across page refreshes (up to 50 messages, stored in `localStorage`). Use the "Clear" button to reset.
 
-### Timeline Tab
-Visual gantt chart of today's app activity. Apps on Y-axis, hours 00–23 on X-axis. Click any block to see sample captures from that app and hour.
+### Timeline
+Gantt chart of today's app activity. Apps on Y-axis, hours 00–23 on X-axis. Block density = how active that app was in that hour. Click any block to see sample captures from that app and hour.
 
-### Context Snapshot
-Click **◈ Export Context Snapshot** in the sidebar to download a structured JSON profile of your last 7 days:
+### Anomalies
+Compares today's per-app frame counts against a rolling N-day baseline (default: 7 days). Flags:
+- **More than usual** — app usage >= 2x daily average
+- **Less than usual** — app usage <= 0.3x daily average
+- **New app** — not seen in the baseline window
 
-```json
-{
-  "generated_at": "...",
-  "window_days": 7,
-  "profile": {
-    "top_apps": [{"app": "VS Code", "hours": 12.3}],
-    "active_hours": [14, 15, 16, 10],
-    "topics": ["typescript", "screenpipe", "react"],
-    "urls_visited": 47,
-    "audio_minutes": 23
-  }
-}
-```
+Configurable window (7 / 14 / 30 days). Refresh on demand.
+
+### Browser Activity
+Shows recent browser extension captures: URL, page title, time spent, scroll depth, and any text you selected. Click "Refresh" to reload. Install the extension first — see [Browser Extension](#browser-extension).
 
 ### Storage Management
-The **Storage** section in the sidebar shows DB size, per-day breakdowns, and a cleanup control. Raw files in `~/.screenpipe/data/` are automatically pruned by `launch.command` at startup (configurable `CLEANUP_DAYS`, default 7).
+The sidebar **Storage** section shows estimated DB size, per-day frame counts, and cleanup controls. Delete old records directly from the dashboard. Raw files in `~/.screenpipe/data/` are automatically pruned by `launch.command` at startup (configurable `CLEANUP_DAYS`, default 7 days).
 
 ---
 
@@ -298,31 +427,33 @@ The **Storage** section in the sidebar shows DB size, per-day breakdowns, and a 
 screenpipe isn't running. Double-click `launch.command`, or run `~/bin/screenpipe` in Terminal.
 
 ### Context API returns empty results
-screenpipe isn't running or has no data yet. Check `curl http://localhost:3030/health`.
+screenpipe isn't running or has no data yet. Check: `curl http://localhost:3030/health`
 
 ### AI chat: "LM Studio not reachable"
-Open LM Studio → Local Server tab → start the server with a model loaded.
+Open LM Studio → Local Server tab → load a model → start the server.
 
 ### AI chat returns a 400 error
 Model context window too small. In LM Studio → Local Server → Settings → set **Context Length** to `8192` or higher.
 
+### Semantic search returns no results / "indexer not running"
+Install deps: `pip install chromadb sentence-transformers`
+Then either restart `launch.command` (it auto-starts the indexer) or run `python3 semantic_search.py` manually. The indexer needs time to index existing captures on first run.
+
+### Browser extension not sending data
+Make sure the Context API is running (`curl http://localhost:3031/health`). Check `chrome://extensions/` → Augur → "Errors" for any permission issues.
+
+### MCP tools not showing in Claude Desktop
+1. Verify the path in `claude_desktop_config.json` is correct and absolute
+2. Verify `context-server.py` is running
+3. Restart Claude Desktop after any config changes
+
 ### launch.command closes immediately
-The screenpipe binary path is wrong. Edit `SCREENPIPE_BIN` in `launch.command`.
+The screenpipe binary path is wrong. Open `launch.command` in a text editor and update `SCREENPIPE_BIN` to match your actual screenpipe location.
 
 ### screenpipe captures nothing
 Grant permissions in System Settings → Privacy & Security:
-- **Screen Recording**
-- **Microphone**
-
----
-
-## Known Limitations
-
-- **macOS only** — screenpipe is macOS-specific
-- **String-match search** — screenpipe search is exact match, not semantic
-- **No real-time streaming** — live feed polls every 5 seconds
-- **AI context window** — LM Studio must be configured to 8192+ context length
-- **Stop button is advisory** — the browser cannot kill OS processes
+- **Screen Recording** — required for OCR
+- **Microphone** — required for audio transcription
 
 ---
 
@@ -330,7 +461,7 @@ Grant permissions in System Settings → Privacy & Security:
 
 ### v0.1 (shipped)
 - [x] Context API server (port 3031) — any agent can call it
-- [x] Agent integration demo with single-query and watch modes
+- [x] Agent integration demo (single-query and watch modes)
 - [x] Timeline tab (gantt chart of daily app activity)
 - [x] Persistent chat memory (localStorage, 50-message cap)
 - [x] Auto-cleanup of raw files at launch
@@ -341,14 +472,14 @@ Grant permissions in System Settings → Privacy & Security:
 - [x] Browser extension (MV3) — URL, title, dwell time, scroll depth, text selection
 - [x] Anomaly detection — dashboard tab + `/anomalies` API
 
-### v0.3 (planned)
-- [ ] Browser captures merged into `/context` ranking (dwell time + selection scoring)
-- [ ] Hybrid scoring — semantic + keyword blended transparently
-- [ ] Semantic indexer auto-started from `launch.command`
-- [ ] Claude + OpenAI API backends in `demo_agent.py`
-- [ ] MCP server — native integration with Claude Desktop, Cursor, and MCP-compatible agents
-- [ ] `/profile` + `/context-card` endpoints
-- [ ] Dashboard: Browser Activity tab + semantic search mode toggle
+### v0.3 (shipped)
+- [x] Browser captures merged into `/context` ranking (dwell time + selection scoring)
+- [x] Hybrid scoring — semantic + keyword blended transparently
+- [x] Semantic indexer auto-started from `launch.command`
+- [x] Claude + OpenAI API backends in `demo_agent.py` (`--api claude|openai`)
+- [x] MCP server — native integration with Claude Desktop, Cursor, and MCP-compatible agents
+- [x] `/profile` + `/context-card` endpoints
+- [x] Dashboard: Browser Activity tab + semantic search mode toggle
 
 ---
 

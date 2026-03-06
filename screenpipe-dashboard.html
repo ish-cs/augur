@@ -925,6 +925,20 @@
     border-top: 1px solid var(--border);
     margin-top: 8px;
   }
+/* ── Search mode toggle ── */
+.search-mode-row { display:flex; align-items:center; gap:8px; padding:0 0 14px; }
+.mode-btn { background:var(--surface); border:1px solid var(--border); color:var(--dim); font-family:var(--mono); font-size:11px; padding:4px 12px; cursor:pointer; transition:all .15s; }
+.mode-btn:hover { border-color:var(--green); color:var(--green); }
+.mode-btn.active { border-color:var(--green); color:var(--green); background:rgba(0,255,135,.07); }
+.mode-hint { font-size:10px; color:var(--dimmer); font-family:var(--mono); }
+.sim-score { font-size:10px; color:var(--green); font-family:var(--mono); margin-left:6px; }
+/* ── Browser captures ── */
+.browser-card { background:var(--surface); border:1px solid var(--border); padding:14px 16px; margin-bottom:8px; }
+.browser-card:hover { border-color:rgba(0,255,135,.3); }
+.browser-url { font-size:10px; color:var(--dim); font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:340px; margin-left:6px; }
+.browser-selected { font-size:11px; color:var(--green); font-style:italic; margin-top:6px; border-left:2px solid var(--green); padding-left:8px; }
+.badge-browser { background:rgba(0,180,255,.12); color:#00b4ff; border:1px solid rgba(0,180,255,.3); }
+.capture-meta { font-size:10px; color:var(--dimmer); font-family:var(--mono); margin-top:2px; }
 </style>
 </head>
 <body>
@@ -1163,6 +1177,21 @@
         <div class="empty">
           <div class="empty-icon">⚠</div>
           <div class="empty-title">Loading anomalies...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Browser Activity tab -->
+    <div class="feed" id="browserTab" style="display:none;flex-direction:column;gap:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0 0 16px">
+        <div class="section-label">browser captures · urls · dwell time · selections</div>
+        <button class="search-btn" onclick="loadBrowserActivity()" style="font-size:10px;padding:6px 14px">↺ Refresh</button>
+      </div>
+      <div id="browserContent">
+        <div class="empty">
+          <div class="empty-icon">⬡</div>
+          <div class="empty-title">No browser captures yet</div>
+          <div class="empty-sub">Install the Augur browser extension and browse normally.<br>Captures appear here automatically.</div>
         </div>
       </div>
     </div>
@@ -1608,21 +1637,38 @@ async function loadFeed() {
 }
 
 // ── Search ────────────────────────────────────────────────────────
+var _searchMode = 'keyword';
+
+function setSearchMode(mode) {
+  _searchMode = mode;
+  document.getElementById('modeKeyword').classList.toggle('active', mode === 'keyword');
+  document.getElementById('modeSemantic').classList.toggle('active', mode === 'semantic');
+  document.getElementById('searchModeHint').textContent =
+    mode === 'semantic' ? 'uses local vector embeddings — requires semantic indexer running' : '';
+}
+
 async function doSearch() {
   const q = document.getElementById('searchInput').value.trim();
-  const limit = document.getElementById('limitSelect').value;
   if (!q) return;
-
   switchTab('search', document.querySelectorAll('.tab')[1]);
-  const tab = document.getElementById('searchTab');
-  tab.innerHTML = '<div class="loading"><div class="spinner"></div> Searching...</div>';
+  if (_searchMode === 'semantic') {
+    await _doSemanticSearch(q);
+  } else {
+    await _doKeywordSearch(q);
+  }
+}
+
+async function _doKeywordSearch(q) {
+  const limit = document.getElementById('limitSelect').value;
+  const results = document.getElementById('searchResults');
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Searching...</div>';
 
   try {
     const r = await fetch(`${API}/search?q=${encodeURIComponent(q)}&limit=${limit}`);
     const d = await r.json();
 
     if (!d.data || d.data.length === 0) {
-      tab.innerHTML = `<div class="empty">
+      results.innerHTML = `<div class="empty">
         <div class="empty-icon">⌕</div>
         <div class="empty-title">No results for "${q}"</div>
         <div class="empty-sub">Try a different search term.</div>
@@ -1630,11 +1676,59 @@ async function doSearch() {
       return;
     }
 
-    tab.innerHTML = `<div style="font-size:11px;color:var(--dim);margin-bottom:12px">
+    results.innerHTML = `<div style="font-size:11px;color:var(--dim);margin-bottom:12px">
       ${d.pagination.total} results for <span style="color:var(--green)">"${q}"</span>
     </div>` + d.data.map(item => renderCard(item, q)).join('');
   } catch(e) {
-    tab.innerHTML = `<div class="empty"><div class="empty-title">Search failed</div></div>`;
+    results.innerHTML = `<div class="empty"><div class="empty-title">Search failed</div></div>`;
+  }
+}
+
+async function _doSemanticSearch(q) {
+  const limit = document.getElementById('limitSelect').value;
+  const results = document.getElementById('searchResults');
+  results.innerHTML = '<div class="loading"><div class="spinner"></div> Running semantic search...</div>';
+
+  try {
+    const r = await fetch(`http://localhost:3031/context?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (!r.ok) throw new Error('Context API unavailable');
+    const d = await r.json();
+    const items = d.results || [];
+
+    if (items.length === 0) {
+      results.innerHTML = `<div class="empty">
+        <div class="empty-icon">⌕</div>
+        <div class="empty-title">No semantic results for "${q}"</div>
+        <div class="empty-sub">Make sure the semantic indexer is running.</div>
+      </div>`;
+      return;
+    }
+
+    const cards = items.map(item => {
+      const source = item.source || 'ocr';
+      const time = item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '';
+      const score = item.score != null ? `<span class="sim-score">score ${item.score.toFixed(2)}</span>` : '';
+      const badgeClass = source === 'browser' ? 'badge-browser' : '';
+      const text = (item.text || item.transcription || item.title || '').slice(0, 300);
+      const app = item.app_name || item.url || '';
+      return `<div class="card">
+        <div class="card-header">
+          <span class="badge ${badgeClass}">${source.toUpperCase()}</span>
+          <span class="capture-meta">${app}</span>
+          ${score}
+          <span style="margin-left:auto;font-size:10px;color:var(--dimmer)">${time}</span>
+        </div>
+        <div class="card-text">${text}</div>
+      </div>`;
+    }).join('');
+
+    results.innerHTML = `<div style="font-size:11px;color:var(--dim);margin-bottom:12px">
+      ${items.length} semantic results for <span style="color:var(--green)">"${q}"</span>
+      ${d.semantic_enhanced ? ' · <span style="color:var(--green)">✓ semantic</span>' : ''}
+    </div>` + cards;
+  } catch(e) {
+    results.innerHTML = `<div class="empty"><div class="empty-title">Semantic search failed</div>
+      <div class="empty-sub">${e.message}</div></div>`;
   }
 }
 
@@ -1736,9 +1830,11 @@ function switchTab(name, el) {
   document.getElementById('aiTab').style.display = name === 'ai' ? 'flex' : 'none';
   document.getElementById('timelineTab').style.display = name === 'timeline' ? 'flex' : 'none';
   document.getElementById('anomaliesTab').style.display = name === 'anomalies' ? 'flex' : 'none';
+  document.getElementById('browserTab').style.display = name === 'browser' ? 'flex' : 'none';
   if (name === 'ai') setTimeout(() => document.getElementById('aiInput').focus(), 100);
   if (name === 'timeline') loadTimeline();
   if (name === 'anomalies') loadAnomalies();
+  if (name === 'browser') loadBrowserActivity();
 }
 
 // ── Auto refresh ──────────────────────────────────────────────────
@@ -2122,6 +2218,52 @@ function renderAnomalies(data) {
       Compared ${data.total_frames_today?.toLocaleString()} frames today against ${data.days_compared}-day baseline ·
       Generated ${new Date(data.generated_at).toLocaleTimeString()}
     </div>`;
+}
+
+// ── Browser Activity ──────────────────────────────────────────────
+async function loadBrowserActivity() {
+  const el = document.getElementById('browserContent');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div> Loading browser captures...</div>';
+
+  try {
+    const r = await fetch('http://localhost:3031/browser-captures?limit=50');
+    if (!r.ok) throw new Error('Context API unavailable — is context-server.py running?');
+    const d = await r.json();
+    const captures = d.captures || [];
+
+    if (captures.length === 0) {
+      el.innerHTML = `<div class="empty">
+        <div class="empty-icon">⬡</div>
+        <div class="empty-title">No browser captures yet</div>
+        <div class="empty-sub">Install the Augur browser extension and browse normally.<br>Captures appear here automatically.</div>
+      </div>`;
+      return;
+    }
+
+    el.innerHTML = captures.map(cap => {
+      const time = cap.timestamp ? new Date(cap.timestamp).toLocaleTimeString() : '';
+      const date = cap.timestamp ? new Date(cap.timestamp).toLocaleDateString() : '';
+      const dwell = cap.dwell_seconds != null ? `${Math.round(cap.dwell_seconds)}s` : '';
+      const scroll = cap.scroll_depth != null ? `${Math.round(cap.scroll_depth * 100)}% scroll` : '';
+      const selected = cap.selected_text ? `<div class="browser-selected">"${cap.selected_text.slice(0,200)}"</div>` : '';
+      const meta = [dwell, scroll].filter(Boolean).join(' · ');
+      return `<div class="browser-card">
+        <div class="card-header">
+          <span class="badge badge-browser">BROWSER</span>
+          <span class="browser-url">${cap.url || ''}</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--dimmer)">${date} ${time}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text);margin:6px 0 2px">${cap.title || ''}</div>
+        ${meta ? `<div class="capture-meta">${meta}</div>` : ''}
+        ${selected}
+      </div>`;
+    }).join('');
+  } catch(e) {
+    el.innerHTML = `<div class="empty">
+      <div class="empty-title">Could not load browser captures</div>
+      <div class="empty-sub">${e.message}</div>
+    </div>`;
+  }
 }
 
 init();

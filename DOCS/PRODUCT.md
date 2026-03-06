@@ -1,6 +1,6 @@
 # Augur — Product Document
 
-# CURRENT VERSION: v0.2 (v0.3 in planning — see PLAN.md)
+# CURRENT VERSION: v0.3
 
 ---
 
@@ -8,13 +8,16 @@
 
 Augur is a **personal context layer for AI agents** — built on top of [screenpipe](https://github.com/mediar-ai/screenpipe), an open-source tool that continuously captures and OCRs your screen and audio.
 
-**v0.2 shipped five things:**
+**v0.3 ships eight things:**
 
 1. **A Context API** (`context-server.py`) — a local HTTP server any AI agent can query to get ranked, relevant screen context. This is the actual product.
-2. **A Dashboard** (`screenpipe-dashboard.html`) — a browser UI for exploring captured data, with AI chat, search, SQL access, timeline, anomaly detection, and more. This is the research/demo surface.
+2. **A Dashboard** (`screenpipe-dashboard.html`) — a browser UI for exploring captured data, with AI chat, search (keyword + semantic modes), SQL access, timeline, anomaly detection, and browser activity. The research/demo surface.
 3. **Semantic search** (`semantic_search.py`) — Chroma vector store + sentence-transformers embeddings. Indexes screenpipe captures for meaning-based retrieval beyond keyword matching.
 4. **Browser extension** (`extension/`) — MV3 Chrome extension that captures URL, title, selected text, time on page, and scroll depth, and sends them to the Context API.
 5. **Anomaly detection** — Dashboard tab + `/anomalies` API endpoint that surfaces unusual behavioral patterns by comparing today's app usage against a rolling N-day baseline.
+6. **Hybrid scoring** — browser captures + semantic similarity blended into `/context` ranking (dwell time bonus, selection bonus, semantic cosine × 2.0).
+7. **MCP server** (`mcp_server.py`) — pure stdlib Model Context Protocol server exposing 5 Augur tools to Claude Desktop, Cursor, and any MCP-compatible agent.
+8. **Profile endpoints** — `/profile` (rich 7-day behavioral profile) + `/context-card` (compact LLM-injectable profile string) + multi-backend `demo_agent.py` (`--api claude|openai|lmstudio`).
 
 Everything runs locally. No data leaves the machine. No API keys required.
 
@@ -256,7 +259,7 @@ Two-column grid: 280px sidebar + fluid main content. Full viewport height minus 
 20 most recent captures as cards. Each card: type badge, app/window, timestamp, OCR text (expandable), URL.
 
 ### Tab 2: Search Results
-Full-text search. Matched terms highlighted in green. Result count shown.
+Full-text search with mode toggle. **Keyword** mode: screenpipe `/search` endpoint, matched terms highlighted. **Semantic** mode: calls `/context` via Context API, results ranked by hybrid score with similarity shown. Mode hint explains semantic requirements.
 
 ### Tab 3: Raw SQL
 Direct SQLite queries. Results as auto-detected table. Two preset shortcuts (top apps, recent frames).
@@ -360,14 +363,23 @@ The server uses `SO_REUSEADDR` (via `ReuseHTTPServer` subclass) so it can be kil
 Single-query mode:
 ```bash
 python demo_agent.py "what have I been working on today?"
+python demo_agent.py "what have I been working on?" --api claude
+python demo_agent.py "what have I been working on?" --api openai
 ```
-Flow: calls `/context`, formats results, calls LM Studio, prints answer.
+Flow: calls `/context`, formats results, calls chosen LLM backend, prints answer.
 
 Watch mode:
 ```bash
 python demo_agent.py --watch
+python demo_agent.py --watch --api claude
 ```
 Polls every 30 seconds. When activity changes (detected by frame ID fingerprint), auto-summarizes what changed. Designed as an investor demo showing agents being proactively fed context.
+
+**Backends:**
+- `lmstudio` (default) — local LM Studio at `:1234`
+- `claude` — Anthropic API; requires `ANTHROPIC_API_KEY`; uses `claude-opus-4-6`
+- `openai` — OpenAI API; requires `OPENAI_API_KEY`; respects `OPENAI_MODEL` env var (default `gpt-4o`)
+Cloud backends are lazily imported — `anthropic`/`openai` packages only needed if that backend is used.
 
 ---
 
@@ -378,9 +390,10 @@ Double-click in Finder or run in Terminal. Steps:
 1. **Cleanup:** deletes raw screenpipe files in `~/.screenpipe/data/` older than `CLEANUP_DAYS` (default: 7). Prints freed MB.
 2. **screenpipe:** checks if running on :3030; starts it if not, polls up to 15s for startup
 3. **Context API:** checks if running on :3031; starts `context-server.py` as a background subprocess if not
-4. **LM Studio:** checks :1234, warns if offline (non-blocking)
-5. **Dashboard:** checks HTML file exists, opens in browser
-6. **Keep-alive:** prints `[screenpipe: up] [context-api: up] [LM Studio: up]` every 10 seconds
+4. **Semantic indexer:** checks if `chromadb` + `sentence_transformers` are installed; if so and indexer not running, starts `semantic_search.py` as a detached subprocess; tracks PID in `~/.screenpipe/semantic_indexer.pid`
+5. **LM Studio:** checks :1234, warns if offline (non-blocking)
+6. **Dashboard:** checks HTML file exists, opens in browser
+7. **Keep-alive:** prints `[screenpipe: up] [context-api: up] [semantic: up/down] [LM Studio: up]` every 10 seconds
 
 **Config knobs at top of file:**
 ```python
@@ -448,13 +461,13 @@ The live feed polls every 5 seconds. The "LIVE" badge is cosmetic.
 - [x] Browser extension — MV3 Chrome extension (`extension/`), captures URL + title + selected text + time on page + scroll depth
 - [x] Anomaly detection — dashboard tab + `/anomalies` API, compares today vs rolling N-day baseline
 
-### v0.3 (planned — see PLAN.md)
-- [ ] Browser extension captures wired into `/context` ranking (dwell time + selection bonus scoring)
-- [ ] Hybrid context scoring — semantic similarity blended with keyword score when Chroma index is populated
-- [ ] Auto-start semantic indexer from `launch.command` as a 4th managed service
-- [ ] Claude + OpenAI API backends in `demo_agent.py` alongside LM Studio (`--api claude|openai`)
-- [ ] MCP server (`mcp_server.py`) — expose Augur tools natively to Claude Desktop, Cursor, and any MCP agent
-- [ ] `/profile` endpoint — rich 7-day behavioral profile (top apps + hours + domains + topics)
-- [ ] `/context-card` endpoint — ultra-compact profile string for drop-in LLM system prompt injection
-- [ ] Dashboard: Browser Activity tab showing recent extension captures
-- [ ] Dashboard: Semantic search mode toggle in the Search tab
+### v0.3 (shipped)
+- [x] Browser extension captures wired into `/context` ranking (dwell time + selection bonus scoring)
+- [x] Hybrid context scoring — semantic similarity blended with keyword score when Chroma index is populated
+- [x] Auto-start semantic indexer from `launch.command` as a 4th managed service (PID tracked)
+- [x] Claude + OpenAI API backends in `demo_agent.py` alongside LM Studio (`--api claude|openai|lmstudio`)
+- [x] MCP server (`mcp_server.py`) — pure stdlib, 5 tools, Claude Desktop / Cursor native integration
+- [x] `/profile` endpoint — rich 7-day behavioral profile (top apps + hours + domains + topics)
+- [x] `/context-card` endpoint — ultra-compact profile string for drop-in LLM system prompt injection
+- [x] Dashboard: Browser Activity tab showing recent extension captures
+- [x] Dashboard: Keyword / Semantic search mode toggle in the Search tab
