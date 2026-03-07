@@ -107,7 +107,7 @@ Always-on smart search. For every question:
 - Semantic globals `_semantic_embedder`, `_semantic_collection`, `_semantic_available` cached module-level; `None` = untested, `False` = unavailable
 
 ## Screenpipe binary location
-```
+```/
 /Users/ish/bin/screenpipe
 ```
 
