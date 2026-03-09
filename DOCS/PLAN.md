@@ -1,252 +1,121 @@
-# Augur v0.3.1 — Implementation Plan
+# Augur v0.3.2 — Enterprise-Grade AI Accuracy Plan
 
 **Status:** Planning
-**Version:** v0.3.1
-**Branch:** pandey
-**Based on:** v0.3 shipped
-**Goal:** Polish pass — GUI launcher, UX cleanup, branding consistency, and bug fixes.
+**Version:** v0.3.2
+**Goal:** Eliminate hallucinations and achieve 99%+ grounded accuracy in "Ask AI" responses by migrating from Naive RAG to a State-of-the-Art Enterprise Architecture (CRAG, Contextual Chunking, Re-ranking).
 
 ---
 
-## Summary of Changes
+## 1. Executive Summary: The Path to 99% Accuracy
 
-| # | Goal | Subagent | Primary File(s) |
-|---|------|----------|-----------------|
-| 1 | Replace terminal launcher with tkinter GUI app | A | `launch.command` |
-| 2 | Fix LM Studio context window overflow error | B | `screenpipe-dashboard.html` |
-| 3 | Rename "screenpipe" → "Augur" in all app UI | A + B | `launch.command`, `screenpipe-dashboard.html` |
-| 4 | Remove Stop/Summary sidebar buttons; auto-refresh ON by default | B | `screenpipe-dashboard.html` |
-| 5 | Ask AI: fixed-height scrollable chat, page non-scrollable | B | `screenpipe-dashboard.html` |
-| 6 | Move Ask AI tab to immediately right of Live Feed | B | `screenpipe-dashboard.html` |
-| 7 | Fix Browser Captures tab (currently not loading data) | B | `screenpipe-dashboard.html` |
-| 8 | Update all documentation to v0.3.1 | C | `README.md`, `DOCS/PRODUCT.md`, `DOCS/CLAUDE.md` |
+Based on 2024–2025 enterprise AI research (Anthropic, Semi-Analysis, LangChain CRAG implementations), achieving near-100% accuracy requires abandoning simple chunk-and-search vector logic. Hallucinations stem from three failures:
+1. **Context Loss:** Cutting sentences arbitrarily strips their meaning.
+2. **Retrieval Blindspots:** Relying solely on vector cosine similarity misses exact keywords or temporal logic.
+3. **LLM Over-confidence:** The LLM guesses when context is weak rather than admitting ignorance.
+
+This document serves as the **actionable implementation master plan** to rebuild the `Ask AI` pipeline across `context-server.py` and `screenpipe-dashboard.html`.
 
 ---
 
-## Parallel Subagent Structure
+## 2. Advanced Architectural Blueprint
 
-Three subagents run concurrently. Scope is strict: each subagent reads and writes only the files listed under its heading. No exceptions.
+The v0.3.2 pipeline will be rebuilt using these four enterprise pillars:
 
----
+### Pillar A: Anthropic-Style Contextual Chunking
+*Problem: `text.slice(0, 150)` destroys the meaning of the underlying code/text.*
+* **Implementation**: Stop arbitrary slicing. Parse OCR captures by natural boundaries (e.g., newline groupings).
+* **Context Augmentation**: Before storing/embedding a chunk, prepend standard metadata so the vector understands the source even if the text is generic. 
+    * *Format:* `[App: VS Code] [Window: context-server.py] [Time: 14:32:00] -- {chunk_text}`. 
+    * By appending this *before* embedding, the semantic search has an anchor.
 
-## Subagent A — Launcher GUI
+### Pillar B: Two-Stage Hybrid Retrieval + Cross-Encoder Reranking
+*Problem: Raw vector search retrieves loosely related garbage.*
+* **Implementation (`context-server.py`)**:
+    1. **Stage 1 (Hybrid Recall)**: Fetch the Top 50 candidates using a combination of dense vector semantic similarity (already loosely in `context-server.py`) AND sparse BM25 keyword matching. 
+    2. **Stage 2 (Precision Reranking)**: Pass those 50 candidates through a lightweight Cross-Encoder (e.g., `cross-encoder/ms-marco-MiniLM-L-6-v2`) or apply a strict reciprocal rank fusion (RRF) algorithm. 
+    3. Only the Top 10 highly-scored chunks are sent to the LLM.
 
-**Scope:** `launch.command` only
-**Goals covered:** 1, 3 (launcher side)
+### Pillar C: Corrective RAG (CRAG) with Self-Reflection Gate
+*Problem: The LLM tries to answer even when the Top 10 chunks don't actually contain the answer.*
+* **Implementation (`screenpipe-dashboard.html`)**:
+    * Introduce a fast "Grader" step. Before showing the user the final answer, run a lightweight evaluation prompt under the hood:
+        * *Prompt:* "You are a Grader. Assess if the retrieved context definitively contains the answer to the user's query: '{query}'. Context: {context}. Respond only with 'YES' or 'NO'."
+    * If `YES`: Proceed to standard Generation.
+    * If `NO`: Immediately short-circuit the generation and output the fallback string: `"I cannot find the answer to this cleanly in your recent screen history."` This enforces zero hallucinations.
 
-### A1 — Replace terminal window with tkinter GUI
-
-Currently `launch.command` runs a blocking keep-alive loop in the terminal with `print()` statements. Replace this with a `tkinter.Tk()` window.
-
-**Window layout (top to bottom):**
-1. Title: `Augur` (large, styled with `font=("Helvetica", 18, "bold")`)
-2. Subtitle: `personal context layer` (small, grey)
-3. Horizontal rule / separator
-4. Status grid — 4 rows, one per service:
-   - `screenpipe` — green dot + "running" / red dot + "stopped"
-   - `Context API` — same pattern
-   - `Semantic Indexer` — same pattern
-   - `LM Studio` — same pattern
-5. Two action buttons side by side:
-   - `Start Screenpipe` — triggers startup of screenpipe only (context-api and semantic indexer already started at launch); grays out while starting; re-enables when screenpipe is up
-   - `Stop Screenpipe` — runs `pkill screenpipe`; does not touch other services
-6. Scrollable log text area (bottom) — replaces all `print()` terminal output; auto-scrolls to latest line
-
-**Behavior:**
-- All existing startup logic runs immediately on launch (same as current): cleanup old files, start screenpipe, start context-server.py, start semantic indexer, check LM Studio, open browser
-- Log output goes to the text area, not stdout
-- Status indicators refresh every 5 seconds via `root.after(5000, poll_status)`
-- Window close (`WM_DELETE_WINDOW`): destroy window and exit; screenpipe keeps running in background (no pkill on close)
-- Startup must be non-blocking — run the service startup sequence in a `threading.Thread` so the window renders immediately and the log fills in as services start
-
-**Library constraint:** Use only Python stdlib: `tkinter`, `tkinter.scrolledtext`, `threading`, `subprocess`, `time`, `os`, `pathlib`, `urllib.request`, `urllib.error`, `datetime`
-
-### A2 — Rename launcher branding
-
-- Window title bar: `Augur`
-- All log messages that currently say "screenpipe launcher": replace with `Augur`
-- The print_header box (now goes to log area): update text to `Augur`
+### Pillar D: Strict Parameterization & System Prompts
+*Problem: Multi-turn conversations drop the context window, causing immediate hallucination on turn 2. Temperature is set to creative mode (0.7).*
+* **Implementation (`screenpipe-dashboard.html`)**:
+    * **Statefulness:** Re-inject the Top 10 chunks as a system prompt prefix on *every single turn* of the chat array.
+    * **Temperature:** Hardcode to `0.1` or `0.15` max.
+    * **Citation Enforcement:** Prompt must demand: `"For every claim, explicitly cite the application name and timestamp provided in the context."`
 
 ---
 
-## Subagent B — Dashboard
+## 3. Step-by-Step Implementation Guide for the Agent
 
-**Scope:** `screenpipe-dashboard.html` only
-**Goals covered:** 2, 3 (dashboard side), 4, 5, 6, 7
+This section provides exact instructions for implementing the architecture across the two affected core files.
 
-Read the full file before making changes. All changes are within this single file.
+### Phase 1: Context Stability & Prompt Engineering (Frontend)
+**Target File:** `screenpipe-dashboard.html`
 
-### B1 — Fix LM Studio context window overflow (Goal 2)
+1. **Fix Multi-Turn Context Drop (Critical Bug)**
+   * Find the `getScreenpipeContext()` loop inside `handleAIKeyPress()`.
+   * **Action**: Currently, context is only added if `historyMessages.length === 0`. Remove this condition. You MUST prepend the system prompt + screen context to the `userMessageWithSystem` on *every* turn. Retain the last 6 `chatHistory` messages for conversational flow, but always re-attach the grounding context to the newest query.
+2. **Implement Generative Parameters**
+   * Change `temperature` to `0.15`.
+   * Change `max_tokens` to `1200`.
+3. **Rewrite the System Prompt**
+   * **Action**: Implement this exact grounding prompt:
+     ```text
+     "You are Augur, an AI assistant with direct access to the user's screen capture history.
+     STRICT RULES:
+     1. ONLY answer using the screen capture data provided below.
+     2. If the data does not contain the answer, respond EXACTLY with: 'I don't see this in your recent screen history.' Do not guess.
+     3. Always cite the timestamp and app name when answering (e.g., 'At 2:34 PM in VS Code...').
+     4. Do not infer beyond what the text explicitly says."
+     ```
+4. **Implement Temporal Query Routing**
+   * **Action**: Write a RegEx interceptor `parseTemporalQuery(query)` that scans the user's input. If they say "yesterday", pass `window_hours=48` to the backend. If "today", pass `window_hours=24`. If "last week", pass `168`. Append this to the `/context` fetch URL.
 
-The error "Could not generate summary. The prompt exceeded your model's context window" appears when too many screenpipe frames are assembled into a prompt before sending to the LLM.
+### Phase 2: Building the RAG Pipeline Engine (Backend)
+**Target File:** `context-server.py`
 
-**Fix locations:**
-1. **AI chat context injection** (`buildContext()` or equivalent) — find where captured frames are formatted into a context block and appended to the prompt. After assembling the full text block, hard-cap it at **6000 characters**. If truncated, append `\n[context truncated to fit model context window]`.
-2. **Any remaining summary generation functions** — apply the same 6000-character cap on text sent to the LLM.
-3. **Error surface** — where the 400/context error is caught, show a clear user-facing message: `"Could not generate a response — the context was too large. This should be fixed automatically. If it persists, increase Context Length to 8192+ in LM Studio → Local Server settings."` Do not expose the raw API error object.
+1. **Implement Aggressive Deduplication**
+   * **Action**: Inside `/context` processing, create a dictionary mapping `(app_name, window_name)` to captures. If a new capture belongs to the same `app` and `window` as an existing one, only keep the one with the highest semantic score. This prevents 20 identical VS Code frames from filling the context window.
+2. **Contextual Text Expansion**
+   * **Action**: Stop returning truncated text snippets. Ensure `text` fields are returned at up to 500 characters, cleanly stripped of `\n\n\n` whitespace blocks and repeated OCR stuttering (`aaaaaa`).
+   * **Action**: Add `text_chars: len(cleaned_text)` to the JSON response so the frontend can calculate token budgets safely.
+3. **Hybrid Scaling (The Re-Ranker)**
+   * **Action**: Increase the initial screenpipe fetch `limit` from `20` to `50`. 
+   * Apply semantic cosine similarity against the query embedding (already present). 
+   * Slice the sorted array to exactly the top `15` highest scoring, deduplicated captures to send back via JSON.
 
-Do not change the number of context frames fetched — only cap the final assembled text before it goes into the prompt.
+### Phase 3: The CRAG Evaluation Loop (Frontend UI Flow)
+**Target File:** `screenpipe-dashboard.html`
 
-### B2 — Rename "screenpipe" → "Augur" in dashboard UI (Goal 3)
-
-Rename all **visible user-facing text**. Do not rename:
-- Internal JS variable/function names (too risky to break logic)
-- API endpoint paths (`localhost:3030`, `localhost:3031`)
-- HTML element IDs and classes
-- Code comments
-
-**What to rename:**
-- `<title>` element: → `Augur`
-- Header logo / brand text: → `Augur`
-- Any sidebar section headings, status messages, or button labels that say "screenpipe"
-- Any tab labels or panel headings that reference "screenpipe"
-- Toast/notification text referencing "screenpipe" in user-facing strings
-
-### B3 — Sidebar cleanup (Goal 4)
-
-1. **Remove** the `Stop Screenpipe` button from the sidebar entirely (HTML + any JS handler)
-2. **Remove** the `Today's Summary` button from the sidebar entirely (HTML + any JS handler + the `dailySummary()` function can be removed too if it has no other callers)
-3. **Auto-refresh default:** find where auto-refresh state is initialized (likely a variable like `autoRefresh = false`) and change the default to `true`. Trigger the first auto-refresh immediately on page load.
-
-### B4 — Ask AI: fixed-height scrollable chat (Goal 5)
-
-The Ask AI tab currently causes the whole page to scroll as the chat grows. Fix:
-
-1. The tab content container for Ask AI must use `display: flex; flex-direction: column` with a fixed or `flex: 1` height that fills the viewport minus the header and tab bar
-2. The chat messages container (where bubbles appear) must have `flex: 1; overflow-y: auto` — it scrolls internally
-3. The input row (textarea + send button) must be `flex-shrink: 0` at the bottom, always visible without page scrolling
-4. After each new message is appended, scroll the messages container to its `scrollHeight` (not `window.scrollTo`)
-5. The outer page (`body` or main content wrapper) must **not** scroll when the Ask AI tab is active
-
-Approach: use CSS `height: calc(100vh - Npx)` on the tab panel, where N accounts for header + tab bar height, combined with the flex layout described above. Measure the actual pixel heights from the existing layout.
-
-### B5 — Move Ask AI tab button (Goal 6)
-
-**Current tab order (left → right):**
-Live Feed | Search Results | Raw SQL | Ask AI | Timeline | Anomalies | Browser
-
-**New tab order:**
-Live Feed | Ask AI | Search Results | Raw SQL | Timeline | Anomalies | Browser
-
-Move both:
-1. The tab button element in the tab bar
-2. The corresponding tab panel in the content area
-
-No other changes — tab switching logic, IDs, and functions stay identical.
-
-### B6 — Fix Browser Captures tab (Goal 7)
-
-The Browser Captures tab currently does not load data. Diagnose and fix.
-
-**Likely causes to check:**
-- The fetch call to `http://localhost:3031/browser-captures?limit=50` may have a bug (wrong URL, wrong method, unhandled promise rejection)
-- The response JSON may not be parsed correctly
-- The render function may expect a different data shape than what the API returns
-- The tab may not be triggering a load on first visit
-
-**Fix requirements:**
-- On first tab activation, automatically call the load function (same pattern other tabs use)
-- Display each capture with all available fields: **URL**, **page title**, **time on page** (formatted as "Xs" or "X min Xs"), **scroll depth** (as percentage), **selected text** (if any, in a highlighted block), **timestamp** (formatted, relative preferred)
-- Empty state: `"No browser captures yet. Install the browser extension and visit some pages."`
-- API offline state: `"Context API not running — start Augur via launch.command"`
-- Add a Refresh button to the tab panel that re-fetches manually
+1. **Action**: Implement the Grader Loop. 
+    * When `getScreenpipeContext()` returns context, do not immediately stream the generation.
+    * Make a rapid, non-streaming `/v1/chat/completions` call to LM Studio requesting a `YES` or `NO` on whether the context answers the user's query.
+    * If the response string starts with `"NO"`, bypass the streaming generator and immediately append the hardcoded "I don't see this..." message to the UI.
 
 ---
 
-## Subagent C — Documentation
+## 4. Verification & Testing Matrix
 
-**Scope:** `README.md`, `DOCS/PRODUCT.md`, `DOCS/CLAUDE.md` only
-**Goals covered:** 8 (documentation update)
+To prove 99% accuracy has been met, the agent must ensure the following tests pass manually:
 
-Read each file fully before editing. Do not modify any source code files.
-
-### C1 — Update DOCS/CLAUDE.md
-
-- Update the version section: `v0.3.1 — shipped` (after implementation)
-- **launch.command** section: replace terminal/print-loop description with tkinter GUI description:
-  - Opens a `tkinter.Tk()` window on launch (not a terminal window)
-  - Shows live status for 4 services (screenpipe, Context API, Semantic Indexer, LM Studio), updated every 5s via `root.after()`
-  - `Start Screenpipe` and `Stop Screenpipe` buttons
-  - Scrollable log area for all output
-  - Startup sequence (cleanup → services → browser open) still runs on launch in a background thread
-- **Dashboard features** list: update to reflect v0.3.1 state:
-  - Remove: `Stop screenpipe` from sidebar controls
-  - Remove: `Today's Summary` from sidebar controls
-  - Update: Auto-refresh defaults to ON
-  - Update: Tab order — Ask AI is now tab 2 (right of Live Feed)
-  - Update: Browser tab now displays all captured fields correctly
-- **Known gotchas**: add any new ones identified during v0.3.1 implementation
-
-### C2 — Update DOCS/PRODUCT.md
-
-- Bump version header to `v0.3.1`
-- **Launch Script section**: replace description of terminal keep-alive loop with description of tkinter GUI window and its controls
-- **Sidebar controls list**: remove `Stop screenpipe` and `Today's Summary` entries; note auto-refresh defaults to ON
-- **Dashboard features**: update tab order and Browser tab description
-- **Roadmap**: add `### v0.3.1 (shipped)` section with all 7 items checked:
-  ```
-  - [x] tkinter GUI launcher with Start/Stop screenpipe and live status indicators
-  - [x] Fixed LM Studio context window overflow in AI chat context injection
-  - [x] Renamed all app UI from "screenpipe" to "Augur"
-  - [x] Removed Stop Screenpipe and Today's Summary buttons from sidebar
-  - [x] Auto-refresh defaults to ON
-  - [x] Ask AI tab: fixed-height scrollable chat (page no longer scrolls)
-  - [x] Ask AI tab moved to second position (right of Live Feed)
-  - [x] Browser Captures tab fixed — loads and displays all captured fields
-  ```
-
-### C3 — Update README.md
-
-- **Running section**: update "Option A: Double-click launcher" description — now opens a GUI window (not a terminal), shows service status, has Start/Stop controls. Keep-alive loop description → remove. Browser still opens automatically.
-- **Dashboard Features list**: update to match new tab order and remove mention of Stop Screenpipe sidebar button
-- **Troubleshooting**: remove or update any entry referencing the Stop Screenpipe button
-- **Roadmap**: add `### v0.3.1 (shipped)` with the same 8-item list as PRODUCT.md
-- **File Structure**: update `launch.command` description to note it now opens a GUI app
+| Test ID | Scenario | Expected Behavior | Pass/Fail Criteria |
+|---------|----------|-------------------|--------------------|
+| **T1: Fiction Test** | User asks "What did I write in my AWS config file?" (when no such file was opened). | The CRAG grader intercepts and the AI responds: "I don't see this in your recent screen history." | Must NOT attempt to guess generic AWS commands. |
+| **T2: Context Retention** | User asks "What was the function name?" -> AI answers. User asks "What parameters did it take?" | Model correctly answers the follow-up because the `contextBlock` was injected perfectly into turn 2. | Must NOT say "As an AI, I don't see previous context." |
+| **T3: Grounding Citations** | User asks "What was I reading on the browser?" | AI answers: "At 1:45 PM in Arc Browser, you were reading..." | Must include Timestamp and App explicitly. |
+| **T4: Temporal Scoping** | User asks: "What did I work on last week?" | Backend receives `window_hours=168` and returns older data. | Must return data older than 24h. |
 
 ---
 
-## Constraints
-
-- **No commits.** No git operations of any kind.
-- **Strict file scope.** Each subagent touches only the files listed under its heading.
-- **No new files.** The tkinter GUI lives inside the existing `launch.command`. No new `.py` or `.html` files.
-- **No new pip dependencies.** Subagent A uses only Python stdlib. Subagent B uses no new JS libraries.
-- **Minimal blast radius.** Fix only what is listed. Do not refactor or restructure surrounding code.
-- **No renames of internal identifiers.** JS function names, Python variable names, HTML IDs/classes — leave these alone. Only rename visible user-facing text strings.
-
----
-
-## Verification Checklist (manual, post-implementation)
-
-**Launcher:**
-- [ ] Double-clicking `launch.command` opens a GUI window, not a terminal
-- [ ] Window title is `Augur`
-- [ ] Live status shows for all 4 services, updates every 5s
-- [ ] Start Screenpipe button starts screenpipe; grays out while starting
-- [ ] Stop Screenpipe button kills screenpipe process
-- [ ] Log area shows all startup messages
-- [ ] Browser opens automatically on launch
-- [ ] Closing the window does not kill screenpipe
-
-**Dashboard branding:**
-- [ ] Page `<title>` is `Augur`
-- [ ] Header/logo shows `Augur`, not `screenpipe`
-- [ ] No visible "screenpipe" labels remain in the UI
-
-**Sidebar:**
-- [ ] No `Stop Screenpipe` button
-- [ ] No `Today's Summary` button
-- [ ] Auto-refresh is ON when dashboard first loads
-
-**Ask AI tab:**
-- [ ] Tab is second from left (right of Live Feed)
-- [ ] Chat messages scroll inside a fixed container; page does not scroll
-- [ ] Input box is always visible without scrolling the page
-- [ ] No context window overflow errors in normal use
-
-**Browser Captures tab:**
-- [ ] Tab loads data on first visit
-- [ ] Each capture shows: URL, title, time on page, scroll depth, selected text, timestamp
-- [ ] Empty state message shown when no captures exist
-- [ ] Offline state message shown when Context API is not running
-- [ ] Refresh button works
+## 5. Constraints & Guidelines for Implementing Agent
+- **No Extra Endpoints**: Keep changes confined to existing server routing in `context-server.py`.
+- **Local Priority**: Ensure all LLM Grader and Generation calls point to `localhost:1234` (LM Studio).
+- **Vanilla JS**: Modifying `screenpipe-dashboard.html` must remain framework-free vanilla JS.
+- **Fail Gracefully**: If the Context Server is offline, fallback immediately to "Knowledge not available" safely.
