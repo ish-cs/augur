@@ -227,7 +227,7 @@ def run_terminal_mode():
         ps(f"Dashboard not found: {DASHBOARD_PATH}", ok=False); sys.exit(1)
     tlog("  ⟳  Opening dashboard in browser...")
     time.sleep(0.5)
-    webbrowser.open(f"file://{DASHBOARD_PATH}")
+    webbrowser.open(f"http://localhost:{CONTEXT_PORT}/dashboard")
     ps("Dashboard opened")
     print()
     print("  ┌─────────────────────────────────────┐")
