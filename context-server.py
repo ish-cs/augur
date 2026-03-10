@@ -1031,6 +1031,20 @@ class ContextHandler(BaseHTTPRequestHandler):
             days = int(p('days', 7))
             self.send_json(200, get_context_card(days))
 
+        elif parsed.path in ('/', '/dashboard'):
+            # Serve the dashboard HTML so origin is http://localhost:3031 (not null)
+            dashboard = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screenpipe-dashboard.html')
+            try:
+                with open(dashboard, 'rb') as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except FileNotFoundError:
+                self.send_json(404, {'error': 'dashboard not found'})
+
         else:
             self.send_json(404, {'error': 'not found', 'endpoints': [
                 '/health', '/context', '/summary', '/anomalies',
